@@ -1,0 +1,138 @@
+diff --git a/cometd-documentation/src/main/asciidoc/java_server_configuration.adoc b/cometd-documentation/src/main/asciidoc/java_server_configuration.adoc
+index d9ca108462..9162675bfd 100644
+--- a/cometd-documentation/src/main/asciidoc/java_server_configuration.adoc
++++ b/cometd-documentation/src/main/asciidoc/java_server_configuration.adoc
+@@ -176,12 +176,15 @@ Here is the list of configuration init parameters (to be specified in `web.xml`)
+ 
+ | browserCookieDomain
+ |
+-| The domain of the cookie used to identify multiple sessions (see also xref:_java_server_multiple_sessions[this section]).
+-  By default there is no domain.
++| The `Domain` attribute of the cookie used to identify multiple sessions (see also xref:_java_server_multiple_sessions[this section]); by default the `Domain` attribute is not sent.
+ 
+ | browserCookiePath
+ | /
+-| The path of the cookie used to identify multiple sessions (see also xref:_java_server_multiple_sessions[this section]).
++| The `Path` attribute of the cookie used to identify multiple sessions (see also xref:_java_server_multiple_sessions[this section]).
++
++| browserCookieMaxAge
++| -1
++| The `Max-Age` attribute of the cookie used to identify multiple sessions in seconds (see also xref:_java_server_multiple_sessions[this section]); if the value is negative, the `Max-Age` attribute is not sent.
+ 
+ | browserCookieSecure
+ | false
+@@ -195,6 +198,10 @@ Here is the list of configuration init parameters (to be specified in `web.xml`)
+ |
+ | The value of the `SameSite` attribute of the cookie used to identify xref:_java_server_multiple_sessions[multiple sessions], see also xref:_java_server_configuration_advanced_cookies[this section].
+   Meaningful values are `Strict`, `Lax` and `None`.
++
++| browserCookiePartitioned
++| false
++| Whether to add the `Partitioned` attribute of the cookie used to identify xref:_java_server_multiple_sessions[multiple sessions], see also xref:_java_server_configuration_advanced_cookies[this section].
+ |===
+ 
+ .WebSocket `ServerTransport` Configuration Parameters
+@@ -302,11 +309,14 @@ Refer to the https://www.eclipse.org/jetty/documentation/current/cross-origin-fi
+ ====== Configuring Cookies
+ 
+ Modern browsers may require that cookies sent by a server have the `SameSite` attribute.
+-https://web.dev/samesite-cookies-explained/[This article] is a good resource that explains how the `SameSite` attribute works.
++link:https://web.dev/samesite-cookies-explained/[This article] is a good resource that explains how the `SameSite` attribute works.
+ 
+ In particular, in the case of cross-domain deployment, the CometD server should be configured to send cookies that have both the `Secure` attribute and the `SameSite=None` attribute.
+ In turn, the `Secure` attribute requires that the CometD server is deployed over `https` (otherwise the browser won't send the cookie, causing the CometD communication to break).
+ 
++Browsers may also require that cookies sent by the server have the `Partitioned` attribute.
++link:https://developer.mozilla.org/en-US/docs/Web/Privacy/Partitioned_cookies[This article] explains how the `Partitioned` attribute is necessary when the JavaScript CometD client is embedded in a web page whose domain is different from the CometD domain (typical, for example,for chat panels embedded in a web page).
++
+ Refer to the CometD xref:_java_server_configuration_transports[server configuration section] for the cookie configuration in the CometD server.
+ 
+ [[_java_server_configuration_servlet_30]]
+diff --git a/cometd-java/cometd-java-server/cometd-java-server-common/src/main/java/org/cometd/server/http/AbstractHttpTransport.java b/cometd-java/cometd-java-server/cometd-java-server-common/src/main/java/org/cometd/server/http/AbstractHttpTransport.java
+index 3d3e94788a..3da24240df 100644
+--- a/cometd-java/cometd-java-server/cometd-java-server-common/src/main/java/org/cometd/server/http/AbstractHttpTransport.java
++++ b/cometd-java/cometd-java-server/cometd-java-server-common/src/main/java/org/cometd/server/http/AbstractHttpTransport.java
+@@ -53,7 +53,6 @@
+ import org.cometd.server.BayeuxServerImpl;
+ import org.cometd.server.ServerMessageImpl;
+ import org.cometd.server.ServerSessionImpl;
+-import org.eclipse.jetty.util.thread.AutoLock;
+ import org.eclipse.jetty.util.thread.Scheduler.Task;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -69,9 +68,11 @@ public abstract class AbstractHttpTransport extends AbstractServerTransport {
+     public final static String BROWSER_COOKIE_NAME_OPTION = "browserCookieName";
+     public final static String BROWSER_COOKIE_DOMAIN_OPTION = "browserCookieDomain";
+     public final static String BROWSER_COOKIE_PATH_OPTION = "browserCookiePath";
++    public final static String BROWSER_COOKIE_MAX_AGE_OPTION = "browserCookieMaxAge";
+     public final static String BROWSER_COOKIE_SECURE_OPTION = "browserCookieSecure";
+     public final static String BROWSER_COOKIE_HTTP_ONLY_OPTION = "browserCookieHttpOnly";
+     public final static String BROWSER_COOKIE_SAME_SITE_OPTION = "browserCookieSameSite";
++    public final static String BROWSER_COOKIE_PARTITIONED_OPTION = "browserCookiePartitioned";
+     public final static String MAX_SESSIONS_PER_BROWSER_OPTION = "maxSessionsPerBrowser";
+     public final static String HTTP2_MAX_SESSIONS_PER_BROWSER_OPTION = "http2MaxSessionsPerBrowser";
+     public final static String MULTI_SESSION_INTERVAL_OPTION = "multiSessionInterval";
+@@ -85,9 +86,11 @@ public abstract class AbstractHttpTransport extends AbstractServerTransport {
+     private String _browserCookieName;
+     private String _browserCookieDomain;
+     private String _browserCookiePath;
++    private int _browserCookieMaxAge;
+     private boolean _browserCookieSecure;
+     private boolean _browserCookieHttpOnly;
+     private String _browserCookieSameSite;
++    private boolean _browserCookiePartitioned;
+     private int _maxSessionsPerBrowser;
+     private int _http2MaxSessionsPerBrowser;
+     private long _multiSessionInterval;
+@@ -106,9 +109,11 @@ public void init() {
+         _browserCookieName = getOption(BROWSER_COOKIE_NAME_OPTION, "BAYEUX_BROWSER");
+         _browserCookieDomain = getOption(BROWSER_COOKIE_DOMAIN_OPTION, null);
+         _browserCookiePath = getOption(BROWSER_COOKIE_PATH_OPTION, "/");
++        _browserCookieMaxAge = getOption(BROWSER_COOKIE_MAX_AGE_OPTION, -1);
+         _browserCookieSecure = getOption(BROWSER_COOKIE_SECURE_OPTION, false);
+         _browserCookieHttpOnly = getOption(BROWSER_COOKIE_HTTP_ONLY_OPTION, true);
+         _browserCookieSameSite = getOption(BROWSER_COOKIE_SAME_SITE_OPTION, null);
++        _browserCookiePartitioned = getOption(BROWSER_COOKIE_PARTITIONED_OPTION, false);
+         _maxSessionsPerBrowser = getOption(MAX_SESSIONS_PER_BROWSER_OPTION, 1);
+         _http2MaxSessionsPerBrowser = getOption(HTTP2_MAX_SESSIONS_PER_BROWSER_OPTION, -1);
+         _multiSessionInterval = getOption(MULTI_SESSION_INTERVAL_OPTION, 2000);
+@@ -421,6 +426,9 @@ protected String setBrowserId(Context context) {
+         if (_browserCookiePath != null) {
+             builder.append("; Path=").append(_browserCookiePath);
+         }
++        if (_browserCookieMaxAge >= 0) {
++            builder.append("; Max-Age=").append(_browserCookieMaxAge);
++        }
+         if (_browserCookieHttpOnly) {
+             builder.append("; HttpOnly");
+         }
+@@ -430,6 +438,9 @@ protected String setBrowserId(Context context) {
+         if (_browserCookieSameSite != null) {
+             builder.append("; SameSite=").append(_browserCookieSameSite);
+         }
++        if (_browserCookiePartitioned) {
++            builder.append("; Partitioned");
++        }
+         context.response.addHeader("Set-Cookie", builder.toString());
+ 
+         return browserId;
+diff --git a/cometd-java/cometd-java-server/cometd-java-server-common/src/test/java/org/cometd/server/http/BrowserMappingTest.java b/cometd-java/cometd-java-server/cometd-java-server-common/src/test/java/org/cometd/server/http/BrowserMappingTest.java
+index cbe30514f2..c96b7c9120 100644
+--- a/cometd-java/cometd-java-server/cometd-java-server-common/src/test/java/org/cometd/server/http/BrowserMappingTest.java
++++ b/cometd-java/cometd-java-server/cometd-java-server-common/src/test/java/org/cometd/server/http/BrowserMappingTest.java
+@@ -245,6 +245,7 @@ public void testCookieConfiguration(String serverTransport) throws Exception {
+         options.put(JSONTransport.BROWSER_COOKIE_DOMAIN_OPTION, cookieDomain);
+         options.put(JSONTransport.BROWSER_COOKIE_PATH_OPTION, cookiePath);
+         options.put(JSONTransport.BROWSER_COOKIE_SAME_SITE_OPTION, cookieSameSite);
++        options.put(JSONTransport.BROWSER_COOKIE_PARTITIONED_OPTION, "true");
+         startServer(serverTransport, options);
+ 
+         Request handshake = newBayeuxRequest("" +
+@@ -273,6 +274,7 @@ public void testCookieConfiguration(String serverTransport) throws Exception {
+         Assertions.assertTrue(parts.contains("Domain=" + cookieDomain));
+         Assertions.assertTrue(parts.contains("HttpOnly"));
+         Assertions.assertTrue(parts.contains("SameSite=" + cookieSameSite));
++        Assertions.assertTrue(parts.contains("Partitioned"));
+     }
+ 
+     private boolean isSuccessful(ContentResponse response) {
